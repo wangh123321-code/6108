@@ -38,9 +38,16 @@ onMounted(() => {
       <div class="w-80 shrink-0 h-full overflow-hidden">
         <ControlPanel
           :params="sim.serveParams.value"
+          :compare-slots="sim.compareSlots.value"
+          :active-slot-id="sim.activeSlotId.value"
           @update:params="(p) => (sim.serveParams.value = p)"
           @launch="handleLaunch"
           @reset="handleReset"
+          @save-slot="sim.saveCompareSlot"
+          @toggle-slot-visible="sim.toggleSlotVisible"
+          @update-slot-color="sim.updateSlotColor"
+          @apply-slot-params="sim.applySlotParams"
+          @clear-slot="sim.clearSlot"
         />
       </div>
 
@@ -52,6 +59,9 @@ onMounted(() => {
           :bounce-events="sim.bounceEvents.value"
           :params="sim.serveParams.value"
           :trajectory-points="sim.trajectoryPoints.value"
+          :compare-slots="sim.compareSlots.value"
+          :diff-labels="sim.computeDiffLabels.value"
+          :active-slot-id="sim.activeSlotId.value"
         />
       </div>
     </div>

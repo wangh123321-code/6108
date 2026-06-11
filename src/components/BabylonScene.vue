@@ -11,7 +11,6 @@ import {
   StandardMaterial,
   Color3,
   Color4,
-  LinesMesh,
   DynamicTexture,
   Quaternion,
   ShadowGenerator,
@@ -19,8 +18,9 @@ import {
   GlowLayer,
   PointLight,
   TransformNode,
+  Curve3,
 } from '@babylonjs/core'
-import type { SimFrame, ServeParams, BounceEvent } from '@/types'
+import type { SimFrame, ServeParams, BounceEvent, CompareSlotData, DiffLabel, SlotId } from '@/types'
 import {
   TABLE_LENGTH,
   TABLE_WIDTH,
@@ -39,6 +39,9 @@ const props = defineProps<{
   bounceEvents: { frame: SimFrame; event: BounceEvent }[]
   params: ServeParams
   trajectoryPoints: { x: number; y: number; z: number }[]
+  compareSlots: CompareSlotData[]
+  diffLabels: DiffLabel[]
+  activeSlotId: SlotId | null
 }>()
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
@@ -46,12 +49,23 @@ const engine = shallowRef<Engine | null>(null)
 const scene = shallowRef<Scene | null>(null)
 const camera = shallowRef<ArcRotateCamera | null>(null)
 const ballMesh = shallowRef<any>(null)
-const trajectoryLine = shallowRef<LinesMesh | null>(null)
+const trajectoryTubes = shallowRef<Map<SlotId | 'main', any>>(new Map())
+const trajectoryMaterials = shallowRef<Map<SlotId | 'main', any>>(new Map())
 const bounceMarkers = shallowRef<any[]>([])
-const labelTexture = shallowRef<DynamicTexture | null>(null)
+const diffLabelMeshes = shallowRef<any[]>([])
+const slotStartMarkers = shallowRef<Map<SlotId, any>>(new Map())
 
 const activePreset = ref('default')
 const showLabels = ref(true)
+
+const hexToColor3 = (hex: string): Color3 => {
+  const h = hex.replace('#', '')
+  return new Color3(
+    parseInt(h.slice(0, 2), 16) / 255,
+    parseInt(h.slice(2, 4), 16) / 255,
+    parseInt(h.slice(4, 6), 16) / 255,
+  )
+}
 
 const disposeMarker = (marker: any) => {
   try {
@@ -65,6 +79,38 @@ const disposeMarker = (marker: any) => {
 const clearBounceMarkers = () => {
   bounceMarkers.value.forEach(disposeMarker)
   bounceMarkers.value = []
+}
+
+const disposeDiffLabels = () => {
+  diffLabelMeshes.value.forEach((m) => {
+    try {
+      m.dispose?.()
+    } catch (e) {}
+  })
+  diffLabelMeshes.value = []
+}
+
+const disposeAllTrajectories = () => {
+  trajectoryTubes.value.forEach((tube) => {
+    try {
+      tube.dispose?.()
+    } catch (e) {}
+  })
+  trajectoryTubes.value.clear()
+
+  trajectoryMaterials.value.forEach((mat) => {
+    try {
+      mat.dispose?.()
+    } catch (e) {}
+  })
+  trajectoryMaterials.value.clear()
+
+  slotStartMarkers.value.forEach((m) => {
+    try {
+      m.dispose?.()
+    } catch (e) {}
+  })
+  slotStartMarkers.value.clear()
 }
 
 const createBallWithGridLines = (s: Scene) => {
@@ -257,47 +303,221 @@ const createNet = (s: Scene) => {
   return netGroup
 }
 
-const createTrajectoryLine = (s: Scene) => {
-  const line = MeshBuilder.CreateLines(
-    'trajectory',
-    { points: [new Vector3(0, 0, 0)], updatable: true },
-    s,
-  )
-  line.color = new Color3(1, 0.6, 0.1)
-  line.alpha = 0.9
-  line.isPickable = false
-  return line
-}
-
-const updateTrajectory = (points: { x: number; y: number; z: number }[], colorHex: string, upToIdx: number) => {
-  if (!trajectoryLine.value || !scene.value || points.length === 0) return
-  const vecPoints: Vector3[] = []
-  const hex = colorHex.replace('#', '')
-  const r = parseInt(hex.slice(0, 2), 16) / 255
-  const g = parseInt(hex.slice(2, 4), 16) / 255
-  const b = parseInt(hex.slice(4, 6), 16) / 255
+const createTrajectoryTube = (
+  s: Scene,
+  key: SlotId | 'main',
+  points: { x: number; y: number; z: number }[],
+  colorHex: string,
+  upToIdx: number,
+) => {
+  if (!s || points.length < 2) return
 
   const maxIdx = Math.min(upToIdx, points.length - 1)
-  const step = Math.max(1, Math.ceil(maxIdx / 500))
+  const step = Math.max(1, Math.ceil(maxIdx / 300))
 
+  const vecPoints: Vector3[] = []
   for (let i = 0; i <= maxIdx; i += step) {
-    const p = points[i]
-    vecPoints.push(new Vector3(p.x, p.y, p.z))
+    vecPoints.push(new Vector3(points[i].x, points[i].y, points[i].z))
   }
   const last = Math.min(maxIdx, points.length - 1)
   if (last % step !== 0) {
-    const p = points[last]
-    vecPoints.push(new Vector3(p.x, p.y, p.z))
+    vecPoints.push(new Vector3(points[last].x, points[last].y, points[last].z))
+  }
+  if (vecPoints.length < 2) return
+
+  const existingTube = trajectoryTubes.value.get(key)
+  if (existingTube) {
+    try {
+      existingTube.dispose()
+    } catch (e) {}
   }
 
-  MeshBuilder.CreateLines(
-    'trajectory',
-    { points: vecPoints, instance: trajectoryLine.value, updatable: true },
-    scene.value,
+  const curve = Curve3.CreateCatmullRomSpline(
+    vecPoints,
+    Math.max(1, Math.floor(vecPoints.length / 2)),
+    false,
   )
-  if (trajectoryLine.value) {
-    trajectoryLine.value.color = new Color3(r, g, b)
+  const tube = MeshBuilder.CreateTube(
+    `traj_${String(key)}`,
+    {
+      path: curve.getPoints(),
+      radius: 0.006,
+      tessellation: 10,
+      updatable: false,
+    },
+    s,
+  )
+  tube.isPickable = false
+
+  let mat = trajectoryMaterials.value.get(key)
+  if (!mat) {
+    mat = new StandardMaterial(`trajMat_${String(key)}`, s)
+    mat.disableLighting = true
+    trajectoryMaterials.value.set(key, mat)
   }
+  const c3 = hexToColor3(colorHex)
+  mat.emissiveColor = c3
+  mat.diffuseColor = c3
+  mat.alpha = key === 'main' ? 0.95 : 0.85
+  tube.material = mat
+
+  trajectoryTubes.value.set(key, tube)
+}
+
+const createSlotStartMarker = (
+  s: Scene,
+  slotId: SlotId,
+  colorHex: string,
+  position: { x: number; y: number; z: number },
+) => {
+  const existing = slotStartMarkers.value.get(slotId)
+  if (existing) {
+    try {
+      existing.dispose()
+    } catch (e) {}
+  }
+
+  const marker = new TransformNode(`slotStart_${slotId}`, s)
+
+  const sphere = MeshBuilder.CreateSphere(
+    `slotSphere_${slotId}`,
+    { diameter: 0.06, segments: 16 },
+    s,
+  )
+  sphere.position.set(position.x, position.y + 0.03, position.z)
+  const mat = new StandardMaterial(`slotStartMat_${slotId}`, s)
+  const c3 = hexToColor3(colorHex)
+  mat.emissiveColor = c3
+  mat.diffuseColor = c3
+  mat.disableLighting = true
+  sphere.material = mat
+  sphere.parent = marker
+
+  const labelCanvas = document.createElement('canvas')
+  labelCanvas.width = 64
+  labelCanvas.height = 64
+  const ctx = labelCanvas.getContext('2d')!
+  ctx.clearRect(0, 0, 64, 64)
+  ctx.fillStyle = colorHex
+  ctx.beginPath()
+  ctx.arc(32, 32, 28, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.strokeStyle = 'rgba(255,255,255,0.9)'
+  ctx.lineWidth = 3
+  ctx.stroke()
+  ctx.font = 'bold 28px "PingFang SC", sans-serif'
+  ctx.fillStyle = '#fff'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(slotId, 32, 33)
+
+  const dynTex = new DynamicTexture(`slotLabelTex_${slotId}`, { width: 64, height: 64 }, s, false)
+  dynTex.getContext().drawImage(labelCanvas, 0, 0)
+  dynTex.update()
+
+  const labelPlane = MeshBuilder.CreatePlane(`slotLabelPlane_${slotId}`, { width: 0.1, height: 0.1 }, s)
+  labelPlane.position.set(position.x, position.y + 0.12, position.z)
+  labelPlane.billboardMode = 7
+  const labelMat = new StandardMaterial(`slotLabelMat_${slotId}`, s)
+  labelMat.diffuseTexture = dynTex
+  labelMat.opacityTexture = dynTex
+  labelMat.useAlphaFromDiffuseTexture = true
+  labelMat.disableLighting = true
+  labelMat.backFaceCulling = false
+  labelPlane.material = labelMat
+  labelPlane.parent = marker
+
+  slotStartMarkers.value.set(slotId, marker)
+}
+
+const createDiffLabelMesh = (s: Scene, label: DiffLabel, index: number) => {
+  const group = new TransformNode(`diffGroup_${index}`, s)
+
+  let bgColor = 'rgba(10,20,40,0.92)'
+  let accentColor = '#F59E0B'
+  if (label.type === 'arc_height') accentColor = '#F97316'
+  if (label.type === 'bounce_offset') accentColor = '#10B981'
+  if (label.type === 'net_height') accentColor = '#06B6D4'
+
+  const titleMap: Record<string, string> = {
+    arc_height: '📐 最高弧线差',
+    bounce_offset: '📍 弹跳点偏移',
+    net_height: '🌐 过网高度差',
+  }
+
+  const padding = 16
+  const lineHeight = 28
+  const titleText = titleMap[label.type] || label.type
+  const lines = [
+    titleText,
+    label.text,
+    `${label.slotA}: ${(label.valueA * 100).toFixed(1)}cm  |  ${label.slotB}: ${(label.valueB * 100).toFixed(1)}cm`,
+  ]
+  const canvasWidth = 360
+  const canvasHeight = padding * 2 + lines.length * lineHeight
+
+  const labelCanvas = document.createElement('canvas')
+  labelCanvas.width = canvasWidth
+  labelCanvas.height = canvasHeight
+  const ctx = labelCanvas.getContext('2d')!
+
+  ctx.fillStyle = bgColor
+  ctx.beginPath()
+  const radius = 14
+  ctx.moveTo(radius, 0)
+  ctx.lineTo(canvasWidth - radius, 0)
+  ctx.quadraticCurveTo(canvasWidth, 0, canvasWidth, radius)
+  ctx.lineTo(canvasWidth, canvasHeight - radius)
+  ctx.quadraticCurveTo(canvasWidth, canvasHeight, canvasWidth - radius, canvasHeight)
+  ctx.lineTo(radius, canvasHeight)
+  ctx.quadraticCurveTo(0, canvasHeight, 0, canvasHeight - radius)
+  ctx.lineTo(0, radius)
+  ctx.quadraticCurveTo(0, 0, radius, 0)
+  ctx.closePath()
+  ctx.fill()
+
+  ctx.strokeStyle = accentColor + 'CC'
+  ctx.lineWidth = 2
+  ctx.stroke()
+
+  ctx.fillStyle = accentColor
+  ctx.fillRect(0, 0, 6, canvasHeight)
+
+  lines.forEach((line, i) => {
+    if (i === 0) {
+      ctx.font = 'bold 18px "PingFang SC", sans-serif'
+      ctx.fillStyle = accentColor
+    } else if (i === 1) {
+      ctx.font = 'bold 17px "PingFang SC", sans-serif'
+      ctx.fillStyle = '#FFFFFF'
+    } else {
+      ctx.font = '13px "PingFang SC", sans-serif'
+      ctx.fillStyle = 'rgba(200,200,220,0.75)'
+    }
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'top'
+    ctx.fillText(line, padding + 8, padding + i * lineHeight + (i === 0 ? 0 : 2))
+  })
+
+  const dynTex = new DynamicTexture(`diffTex_${index}`, { width: canvasWidth, height: canvasHeight }, s, false)
+  dynTex.getContext().drawImage(labelCanvas, 0, 0)
+  dynTex.update()
+
+  const planeWidth = 0.48
+  const planeHeight = (canvasHeight / canvasWidth) * planeWidth
+  const labelPlane = MeshBuilder.CreatePlane(`diffPlane_${index}`, { width: planeWidth, height: planeHeight }, s)
+  labelPlane.position.set(label.position.x, label.position.y, label.position.z)
+  labelPlane.billboardMode = 7
+  const labelMat = new StandardMaterial(`diffMat_${index}`, s)
+  labelMat.diffuseTexture = dynTex
+  labelMat.opacityTexture = dynTex
+  labelMat.useAlphaFromDiffuseTexture = true
+  labelMat.disableLighting = true
+  labelMat.backFaceCulling = false
+  labelPlane.material = labelMat
+  labelPlane.parent = group
+
+  return group
 }
 
 const createBounceMarker = (s: Scene, event: BounceEvent, index: number) => {
@@ -393,6 +613,77 @@ const setCameraPreset = (name: keyof typeof CAMERA_PRESETS) => {
   camera.value.target = new Vector3(preset.target.x, preset.target.y, preset.target.z)
 }
 
+const updateAllTrajectories = () => {
+  if (!scene.value) return
+
+  const visibleSlots = props.compareSlots.filter((s) => s.saved && s.visible)
+  const existingKeys = new Set<SlotId | 'main'>(trajectoryTubes.value.keys())
+  const neededKeys = new Set<SlotId | 'main'>(['main'])
+  visibleSlots.forEach((s) => neededKeys.add(s.id))
+
+  existingKeys.forEach((key) => {
+    if (!neededKeys.has(key)) {
+      const tube = trajectoryTubes.value.get(key)
+      if (tube) {
+        try {
+          tube.dispose()
+        } catch (e) {}
+        trajectoryTubes.value.delete(key)
+      }
+      const mat = trajectoryMaterials.value.get(key)
+      if (mat) {
+        try {
+          mat.dispose()
+        } catch (e) {}
+        trajectoryMaterials.value.delete(key)
+      }
+      const slotKey = key as SlotId
+      if (slotStartMarkers.value.has(slotKey)) {
+        try {
+          slotStartMarkers.value.get(slotKey)?.dispose()
+        } catch (e) {}
+        slotStartMarkers.value.delete(slotKey)
+      }
+    }
+  })
+
+  const upToMain = props.currentFrame
+    ? props.frames.indexOf(props.currentFrame)
+    : props.trajectoryPoints.length - 1
+  const mainColor = props.activeSlotId
+    ? props.compareSlots.find((s) => s.id === props.activeSlotId)?.color || getSpinColor(props.params.spinType)
+    : getSpinColor(props.params.spinType)
+  createTrajectoryTube(
+    scene.value,
+    'main',
+    props.trajectoryPoints,
+    mainColor,
+    Math.max(0, upToMain),
+  )
+
+  visibleSlots.forEach((slot) => {
+    createTrajectoryTube(
+      scene.value!,
+      slot.id,
+      slot.trajectoryPoints,
+      slot.color,
+      slot.trajectoryPoints.length - 1,
+    )
+    if (slot.trajectoryPoints.length > 0) {
+      createSlotStartMarker(scene.value!, slot.id, slot.color, slot.trajectoryPoints[0])
+    }
+  })
+}
+
+const updateDiffLabels = () => {
+  if (!scene.value) return
+  disposeDiffLabels()
+  props.diffLabels.forEach((label, i) => {
+    const mesh = createDiffLabelMesh(scene.value!, label, i)
+    diffLabelMeshes.value.push(mesh)
+  })
+}
+
 onMounted(() => {
   if (!canvasRef.value) return
 
@@ -440,7 +731,6 @@ onMounted(() => {
   createNet(scene.value)
 
   ballMesh.value = createBallWithGridLines(scene.value)
-  trajectoryLine.value = createTrajectoryLine(scene.value)
 
   const shadowGen = new ShadowGenerator(1024, dirLight)
   shadowGen.useBlurExponentialShadowMap = true
@@ -457,6 +747,8 @@ onMounted(() => {
   const glow = new GlowLayer('glow', scene.value)
   glow.intensity = 0.6
 
+  updateAllTrajectories()
+
   engine.value.runRenderLoop(() => {
     scene.value?.render()
   })
@@ -471,6 +763,8 @@ onMounted(() => {
 onUnmounted(() => {
   ;(window as any).__babylonCleanup?.()
   clearBounceMarkers()
+  disposeDiffLabels()
+  disposeAllTrajectories()
   engine.value?.dispose()
 })
 
@@ -483,19 +777,17 @@ watch(
 )
 
 watch(
-  [() => props.trajectoryPoints, () => props.params.spinType, () => props.currentFrameIdx],
-  ([points, spinType]) => {
-    const upTo = props.currentFrame ? props.frames.indexOf(props.currentFrame) : points.length - 1
-    updateTrajectory(points, getSpinColor(spinType), Math.max(0, upTo))
+  () => [props.trajectoryPoints, props.params.spinType, props.currentFrameIdx],
+  () => {
+    updateAllTrajectories()
   },
   { immediate: true, deep: false },
 )
 
 watch(
   () => props.currentFrameIdx,
-  (idx) => {
-    const upTo = Math.max(0, Math.min(idx, props.trajectoryPoints.length - 1))
-    updateTrajectory(props.trajectoryPoints, getSpinColor(props.params.spinType), upTo)
+  () => {
+    updateAllTrajectories()
   },
 )
 
@@ -519,9 +811,28 @@ watch(
     props.bounceEvents.forEach((e, i) => {
       bounceMarkers.value.push(createBounceMarker(scene.value!, e.event, i))
     })
-    const upTo = props.currentFrame ? props.frames.indexOf(props.currentFrame) : props.trajectoryPoints.length - 1
-    updateTrajectory(props.trajectoryPoints, getSpinColor(props.params.spinType), Math.max(0, upTo))
+    updateAllTrajectories()
   },
+)
+
+watch(
+  () => [
+    props.compareSlots.map((s) => `${s.id}:${s.saved}:${s.visible}:${s.color}:${s.frames.length}`).join('|'),
+    props.activeSlotId,
+  ],
+  () => {
+    updateAllTrajectories()
+    updateDiffLabels()
+  },
+  { deep: false },
+)
+
+watch(
+  () => props.diffLabels,
+  () => {
+    updateDiffLabels()
+  },
+  { deep: true },
 )
 
 defineExpose({ setCameraPreset })
@@ -558,6 +869,41 @@ defineExpose({ setCameraPreset })
         <div>🖱️ 左键拖拽：旋转视角</div>
         <div>🖱️ 滚轮：缩放</div>
         <div>🖱️ 右键拖拽：平移</div>
+      </div>
+    </div>
+
+    <div
+      v-if="compareSlots.some(s => s.saved && s.visible)"
+      class="absolute bottom-4 left-4 bg-slate-900/80 backdrop-blur-md rounded-xl px-4 py-3 border border-slate-700/50 shadow-xl"
+    >
+      <div class="text-[10px] text-slate-500 uppercase tracking-wider mb-2">轨迹图例</div>
+      <div class="space-y-1.5">
+        <div
+          v-for="slot in compareSlots.filter(s => s.saved)"
+          :key="slot.id"
+          class="flex items-center gap-2"
+        >
+          <span
+            class="w-3 h-3 rounded-full shrink-0"
+            :class="{ 'ring-2 ring-emerald-400 ring-offset-1 ring-offset-slate-900': activeSlotId === slot.id }"
+            :style="{ backgroundColor: slot.color, opacity: slot.visible ? 1 : 0.3 }"
+          ></span>
+          <span
+            class="text-xs font-medium"
+            :style="{ color: slot.color, opacity: slot.visible ? 1 : 0.4 }"
+          >
+            {{ slot.id }}组 · {{ slot.params ? getSpinColor(slot.params.spinType) && '' : '' }}
+            <span v-if="slot.params" class="text-slate-400 font-normal ml-1">
+              {{ slot.params.speed }}m/s
+            </span>
+          </span>
+          <span
+            v-if="activeSlotId === slot.id"
+            class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 ml-auto"
+          >
+            球体
+          </span>
+        </div>
       </div>
     </div>
   </div>

@@ -1,7 +1,24 @@
 import { ref, computed, watch } from 'vue'
-import type { ServeParams, SimFrame } from '@/types'
+import type { ServeParams, SimFrame, CompareSlotData, SlotId, DiffLabel, BounceEvent } from '@/types'
 import { usePhysics } from './usePhysics'
 import { DEFAULT_SERVE_PARAMS } from '@/utils/constants'
+
+const SLOT_COLORS: Record<SlotId, string> = {
+  A: '#F97316',
+  B: '#06B6D4',
+  C: '#A855F7',
+}
+
+const createEmptySlot = (id: SlotId): CompareSlotData => ({
+  id,
+  params: null,
+  frames: [],
+  trajectoryPoints: [],
+  bounceEvents: [],
+  color: SLOT_COLORS[id],
+  visible: false,
+  saved: false,
+})
 
 export function useSimulation() {
   const { simulate } = usePhysics()
@@ -15,6 +32,128 @@ export function useSimulation() {
   const playbackTime = ref(0)
   let animationFrameId: number | null = null
   let lastTimestamp: number | null = null
+
+  const compareSlots = ref<CompareSlotData[]>([
+    createEmptySlot('A'),
+    createEmptySlot('B'),
+    createEmptySlot('C'),
+  ])
+  const activeSlotId = ref<SlotId | null>(null)
+
+  const visibleCompareSlots = computed(() => {
+    return compareSlots.value.filter((s) => s.saved && s.visible)
+  })
+
+  const getArcHeight = (points: { x: number; y: number; z: number }[]): { height: number; idx: number; point: { x: number; y: number; z: number } } => {
+    if (points.length === 0) return { height: 0, idx: 0, point: { x: 0, y: 0, z: 0 } }
+    let maxY = -Infinity
+    let maxIdx = 0
+    for (let i = 0; i < points.length; i++) {
+      if (points[i].y > maxY) {
+        maxY = points[i].y
+        maxIdx = i
+      }
+    }
+    return { height: maxY, idx: maxIdx, point: points[maxIdx] }
+  }
+
+  const getFirstBouncePoint = (slot: CompareSlotData): { x: number; y: number; z: number } | null => {
+    if (slot.bounceEvents.length === 0) return null
+    return slot.bounceEvents[0].event.position
+  }
+
+  const getNetHeight = (points: { x: number; y: number; z: number }[]): { height: number; idx: number; point: { x: number; y: number; z: number } } => {
+    if (points.length === 0) return { height: 0, idx: 0, point: { x: 0, y: 0, z: 0 } }
+    let closestIdx = 0
+    let closestDist = Infinity
+    for (let i = 0; i < points.length; i++) {
+      const dist = Math.abs(points[i].x)
+      if (dist < closestDist) {
+        closestDist = dist
+        closestIdx = i
+      }
+    }
+    return { height: points[closestIdx].y, idx: closestIdx, point: points[closestIdx] }
+  }
+
+  const computeDiffLabels = computed<DiffLabel[]>(() => {
+    const visible = visibleCompareSlots.value
+    if (visible.length < 2) return []
+
+    const labels: DiffLabel[] = []
+    for (let i = 0; i < visible.length; i++) {
+      for (let j = i + 1; j < visible.length; j++) {
+        const slotA = visible[i]
+        const slotB = visible[j]
+
+        const arcA = getArcHeight(slotA.trajectoryPoints)
+        const arcB = getArcHeight(slotB.trajectoryPoints)
+        if (arcA.idx !== 0 || arcB.idx !== 0) {
+          const arcDiff = Math.abs(arcA.height - arcB.height)
+          const midPoint = {
+            x: (arcA.point.x + arcB.point.x) / 2,
+            y: Math.max(arcA.height, arcB.height) + 0.15,
+            z: (arcA.point.z + arcB.point.z) / 2,
+          }
+          labels.push({
+            type: 'arc_height',
+            position: midPoint,
+            text: `最高弧线差: ${(arcDiff * 100).toFixed(1)}cm (${slotA.id}${arcA.height > arcB.height ? '↑' : '↓'}${slotB.id})`,
+            slotA: slotA.id,
+            slotB: slotB.id,
+            valueA: arcA.height,
+            valueB: arcB.height,
+            diff: arcDiff,
+          })
+        }
+
+        const bounceA = getFirstBouncePoint(slotA)
+        const bounceB = getFirstBouncePoint(slotB)
+        if (bounceA && bounceB) {
+          const offset = Math.sqrt(
+            (bounceA.x - bounceB.x) ** 2 + (bounceA.z - bounceB.z) ** 2,
+          )
+          const midPoint = {
+            x: (bounceA.x + bounceB.x) / 2,
+            y: Math.max(bounceA.y, bounceB.y) + 0.2,
+            z: (bounceA.z + bounceB.z) / 2,
+          }
+          labels.push({
+            type: 'bounce_offset',
+            position: midPoint,
+            text: `弹跳点偏移: ${(offset * 100).toFixed(1)}cm`,
+            slotA: slotA.id,
+            slotB: slotB.id,
+            valueA: 0,
+            valueB: 0,
+            diff: offset,
+          })
+        }
+
+        const netA = getNetHeight(slotA.trajectoryPoints)
+        const netB = getNetHeight(slotB.trajectoryPoints)
+        if (netA.idx !== 0 || netB.idx !== 0) {
+          const netDiff = Math.abs(netA.height - netB.height)
+          const midPoint = {
+            x: 0,
+            y: Math.max(netA.height, netB.height) + 0.15,
+            z: (netA.point.z + netB.point.z) / 2,
+          }
+          labels.push({
+            type: 'net_height',
+            position: midPoint,
+            text: `过网高度差: ${(netDiff * 100).toFixed(1)}cm`,
+            slotA: slotA.id,
+            slotB: slotB.id,
+            valueA: netA.height,
+            valueB: netB.height,
+            diff: netDiff,
+          })
+        }
+      }
+    }
+    return labels
+  })
 
   const totalFrames = computed(() => frames.value.length)
 
@@ -150,6 +289,55 @@ export function useSimulation() {
     }
   }
 
+  const saveCompareSlot = (slotId: SlotId) => {
+    const slot = compareSlots.value.find((s) => s.id === slotId)
+    if (!slot) return
+    const result = simulate(serveParams.value)
+    slot.params = { ...serveParams.value }
+    slot.frames = result.frames
+    slot.trajectoryPoints = result.frames.map((f) => f.position)
+    slot.bounceEvents = result.frames
+      .filter((f) => f.bounceEvent)
+      .map((f) => ({ frame: f, event: f.bounceEvent! }))
+    slot.saved = true
+    slot.visible = true
+  }
+
+  const toggleSlotVisible = (slotId: SlotId) => {
+    const slot = compareSlots.value.find((s) => s.id === slotId)
+    if (slot && slot.saved) {
+      slot.visible = !slot.visible
+    }
+  }
+
+  const updateSlotColor = (slotId: SlotId, color: string) => {
+    const slot = compareSlots.value.find((s) => s.id === slotId)
+    if (slot) {
+      slot.color = color
+    }
+  }
+
+  const applySlotParams = (slotId: SlotId) => {
+    const slot = compareSlots.value.find((s) => s.id === slotId)
+    if (!slot || !slot.params) return
+    activeSlotId.value = slotId
+    serveParams.value = { ...slot.params }
+  }
+
+  const clearSlot = (slotId: SlotId) => {
+    const slot = compareSlots.value.find((s) => s.id === slotId)
+    if (!slot) return
+    slot.params = null
+    slot.frames = []
+    slot.trajectoryPoints = []
+    slot.bounceEvents = []
+    slot.saved = false
+    slot.visible = false
+    if (activeSlotId.value === slotId) {
+      activeSlotId.value = null
+    }
+  }
+
   watch(
     () => serveParams.value,
     () => {
@@ -179,5 +367,14 @@ export function useSimulation() {
     seekToFrame,
     stepForward,
     stepBackward,
+    compareSlots,
+    activeSlotId,
+    visibleCompareSlots,
+    computeDiffLabels,
+    saveCompareSlot,
+    toggleSlotVisible,
+    updateSlotColor,
+    applySlotParams,
+    clearSlot,
   }
 }

@@ -61,3 +61,27 @@ export interface SpinTypeInfo {
   color: string
   description: string
 }
+
+export interface CompareSlotData {
+  id: 'A' | 'B' | 'C'
+  params: ServeParams | null
+  frames: SimFrame[]
+  trajectoryPoints: { x: number; y: number; z: number }[]
+  bounceEvents: { frame: SimFrame; event: BounceEvent }[]
+  color: string
+  visible: boolean
+  saved: boolean
+}
+
+export type SlotId = 'A' | 'B' | 'C'
+
+export interface DiffLabel {
+  type: 'arc_height' | 'bounce_offset' | 'net_height'
+  position: { x: number; y: number; z: number }
+  text: string
+  slotA: SlotId
+  slotB: SlotId
+  valueA: number
+  valueB: number
+  diff: number
+}
