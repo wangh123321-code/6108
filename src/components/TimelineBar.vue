@@ -54,12 +54,13 @@ const onTimelineMouseDown = (e: MouseEvent) => {
 }
 
 const bounceIndicators = computed(() => {
-  if (props.duration <= 0) return []
+  if (props.duration <= 0 || props.totalFrames <= 0) return []
   return props.bounceFrames
     .map((idx) => {
-      return -1
+      const pct = (idx / props.totalFrames) * 100
+      return Math.max(0, Math.min(100, pct))
     })
-    .filter((v) => v >= 0)
+    .filter((v) => v >= 0 && v <= 100)
 })
 </script>
 
@@ -161,7 +162,7 @@ const bounceIndicators = computed(() => {
           >
             <div class="absolute inset-x-0 top-1/2 -translate-y-1/2 h-2 bg-slate-800 rounded-full overflow-hidden">
               <div
-                class="absolute inset-y-0 left-0 bg-gradient-to-r from-emerald-500/60 via-emerald-400 to-teal-400 rounded-full"
+                class="absolute inset-y-0 left-0 bg-gradient-to-r from-emerald-500/60 via-emerald-400 to-teal-400 rounded-full transition-[width] duration-75"
                 :style="{ width: `${progressPct}%` }"
               ></div>
               <div
@@ -171,8 +172,22 @@ const bounceIndicators = computed(() => {
               ></div>
             </div>
 
+            <div class="absolute inset-x-0 top-1/2 -translate-y-1/2 pointer-events-none">
+              <div
+                v-for="(pct, i) in bounceIndicators"
+                :key="`bounce-${i}`"
+                class="absolute top-1/2 -translate-y-1/2 -translate-x-1/2"
+                :style="{ left: `${pct}%` }"
+              >
+                <div class="relative flex flex-col items-center">
+                  <div class="w-1 h-6 bg-rose-500 rounded-sm shadow-md shadow-rose-500/50"></div>
+                  <div class="absolute -top-1 w-3 h-3 bg-rose-500 rotate-45 shadow-md shadow-rose-500/50 animate-pulse"></div>
+                </div>
+              </div>
+            </div>
+
             <div
-              class="absolute top-1/2 -translate-y-1/2 w-5 h-5 bg-white rounded-full shadow-xl shadow-black/50 border-2 border-emerald-500 transition-all duration-100 group-hover:scale-110"
+              class="absolute top-1/2 -translate-y-1/2 w-5 h-5 bg-white rounded-full shadow-xl shadow-black/50 border-2 border-emerald-500 transition-all duration-100 group-hover:scale-110 z-10"
               :style="{ left: `calc(${progressPct}% - 10px)` }"
             >
               <div class="absolute inset-0.5 bg-emerald-400 rounded-full"></div>

@@ -8,7 +8,12 @@ import TimelineBar from '@/components/TimelineBar.vue'
 const sim = useSimulation()
 
 const bounceFrames = computed(() => {
-  return sim.bounceEvents.value.map((e) => sim.frames.value.indexOf(e.frame))
+  return sim.bounceEvents.value
+    .map((e) => {
+      const idx = sim.frames.value.findIndex((f) => f.time === e.frame.time)
+      return idx
+    })
+    .filter((idx) => idx >= 0)
 })
 
 const handleLaunch = () => {
