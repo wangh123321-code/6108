@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  pingpong-simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pingpong-spin-simulator
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+    networks:
+      - pingpong-net
+
+networks:
+  pingpong-net:
+    driver: bridge
